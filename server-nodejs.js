@@ -46,6 +46,29 @@ function processMCPRequest(request) {
   const { method, params, id } = request;
   
   switch (method) {
+    case 'initialize':
+      return {
+        jsonrpc: '2.0',
+        result: {
+          protocolVersion: '2024-11-05',
+          capabilities: {
+            tools: {}
+          },
+          serverInfo: {
+            name: 'Lead Generator MCP Server',
+            version: '1.0.0'
+          }
+        },
+        id
+      };
+      
+    case 'notifications/initialized':
+      return {
+        jsonrpc: '2.0',
+        result: {},
+        id
+      };
+      
     case 'tools/list':
       return {
         jsonrpc: '2.0',
@@ -53,13 +76,11 @@ function processMCPRequest(request) {
           tools: [
             {
               name: 'validate',
-              description: 'Validates phone number format',
+              description: 'Returns server owner phone number',
               inputSchema: {
                 type: 'object',
-                properties: {
-                  phone: { type: 'string', description: 'Phone number to validate' }
-                },
-                required: ['phone']
+                properties: {},
+                required: []
               }
             },
             {
@@ -109,13 +130,14 @@ function handleToolCall(params, id) {
   
   switch (name) {
     case 'validate':
+      // Return server owner's phone number (no parameters needed)
       return {
         jsonrpc: '2.0',
         result: {
           content: [
             {
-              type: 'text',
-              text: JSON.stringify({ phone: '1234567890', valid: true })
+              type: 'text', 
+              text: '918905981880'
             }
           ]
         },
