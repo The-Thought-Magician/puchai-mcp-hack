@@ -7,18 +7,17 @@ import tempfile
 import threading
 import re
 from datetime import datetime, timedelta
-from typing import Annotated, Optional, Dict, List
+from typing import Annotated, Optional, Dict, List, Any, NoReturn
 
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.bearer import BearerAuthProvider, RSAKeyPair
-# Note: BearerAuthProvider is deprecated but used for compatibility with existing examples
 from mcp import ErrorData, McpError
 from mcp.server.auth.provider import AccessToken
-from mcp.types import TextContent, INVALID_PARAMS, INTERNAL_ERROR
+from mcp.types import INVALID_PARAMS, INTERNAL_ERROR
 from pydantic import BaseModel, Field
 
-import google.generativeai as genai
+import google.generativeai as genai  # type: ignore
 import httpx
 
 # --- Load environment variables ---
@@ -39,7 +38,7 @@ assert SERPER_API_KEY is not None, "Please set SERPER_API_KEY in your .env file"
 assert GEMINI_API_KEY is not None, "Please set GEMINI_API_KEY in your .env file"
 
 # Configure Gemini
-genai.configure(api_key=GEMINI_API_KEY)
+genai.configure(api_key=GEMINI_API_KEY)  # type: ignore[attr-defined]
 
 # --- Auth Provider ---
 class SimpleBearerAuthProvider(BearerAuthProvider):
@@ -72,117 +71,84 @@ class LeadRequirement(BaseModel):
     additional_criteria: Optional[str] = Field(description="Additional search criteria or filters")
     max_results: int = Field(default=50, description="Maximum number of results to return")
 
-# --- In-memory storage (like the task example) ---
-LEAD_JOBS: Dict[str, Dict] = {}
-CSV_FILES: Dict[str, Dict] = {}
+# --- In-memory storage ---
+LEAD_JOBS: Dict[str, Dict[str, Any]] = {}
+CSV_FILES: Dict[str, Dict[str, Any]] = {}
 
 # --- Utility Functions ---
 def _now() -> str:
     return datetime.utcnow().isoformat()
 
-def _error(code, msg):
+def _error(code, msg) -> NoReturn:
     raise McpError(ErrorData(code=code, message=msg))
 
 def _cleanup_expired_files():
-    """Remove expired CSV files"""
     current_time = datetime.now()
-    expired_jobs = []
-    
+    expired_jobs: List[str] = []
     for job_id, file_info in CSV_FILES.items():
         if current_time > datetime.fromisoformat(file_info['expires_at']):
             try:
                 if os.path.exists(file_info['file_path']):
                     os.remove(file_info['file_path'])
                 expired_jobs.append(job_id)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 print(f"Error cleaning up file for job {job_id}: {e}")
-    
     for job_id in expired_jobs:
-        if job_id in CSV_FILES:
-            del CSV_FILES[job_id]
-        if job_id in LEAD_JOBS:
-            del LEAD_JOBS[job_id]
+        CSV_FILES.pop(job_id, None)
+        LEAD_JOBS.pop(job_id, None)
 
 def _start_cleanup_scheduler():
     def schedule_cleanup():
         while True:
             _cleanup_expired_files()
-            threading.Event().wait(300)  # Check every 5 minutes
-    
-    cleanup_thread = threading.Thread(target=schedule_cleanup, daemon=True)
-    cleanup_thread.start()
+            threading.Event().wait(300)
+    threading.Thread(target=schedule_cleanup, daemon=True).start()
 
 # --- Serper API Utility Class ---
 class SerperAPI:
     USER_AGENT = "Puch/1.0 (Lead Generator)"
-    
+
     @classmethod
-    async def search(cls, query: str, location: str = None, num_results: int = 10) -> Dict:
-        """Perform Google search via Serper API"""
+    async def search(cls, query: str, location: Optional[str] = None, num_results: int = 10) -> dict[str, Any]:
         headers = {
             'X-API-KEY': SERPER_API_KEY,
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
         }
-        
-        payload = {
-            'q': query,
-            'num': min(num_results, 100)
-        }
-        
+        payload: Dict[str, Any] = {'q': query, 'num': min(num_results, 100)}
         if location:
             payload['gl'] = 'us'
             payload['hl'] = 'en'
-        
         async with httpx.AsyncClient() as client:
             try:
-                response = await client.post(
-                    "https://google.serper.dev/search",
-                    headers=headers,
-                    json=payload,
-                    timeout=30
-                )
-                response.raise_for_status()
-                return response.json()
-            except httpx.HTTPError as e:
+                resp = await client.post("https://google.serper.dev/search", headers=headers, json=payload, timeout=30)
+                resp.raise_for_status()
+                return resp.json()
+            except httpx.HTTPError as e:  # noqa: PERF203
                 _error(INTERNAL_ERROR, f"Serper API error: {str(e)}")
-    
+
     @classmethod
-    async def places_search(cls, query: str, location: str = None, num_results: int = 20) -> Dict:
-        """Perform Google Places search via Serper API"""
+    async def places_search(cls, query: str, location: Optional[str] = None, num_results: int = 20) -> dict[str, Any]:
         headers = {
             'X-API-KEY': SERPER_API_KEY,
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
         }
-        
-        payload = {
-            'q': query,
-            'num': min(num_results, 20)
-        }
-        
+        payload: Dict[str, Any] = {'q': query, 'num': min(num_results, 20)}
         if location:
             payload['gl'] = 'us'
             payload['hl'] = 'en'
-        
         async with httpx.AsyncClient() as client:
             try:
-                response = await client.post(
-                    "https://google.serper.dev/places",
-                    headers=headers,
-                    json=payload,
-                    timeout=30
-                )
-                response.raise_for_status()
-                return response.json()
-            except httpx.HTTPError as e:
+                resp = await client.post("https://google.serper.dev/places", headers=headers, json=payload, timeout=30)
+                resp.raise_for_status()
+                return resp.json()
+            except httpx.HTTPError as e:  # noqa: PERF203
                 _error(INTERNAL_ERROR, f"Serper Places API error: {str(e)}")
 
 # --- Gemini AI Utility Class ---
 class GeminiAI:
     @classmethod
-    async def extract_requirements(cls, user_input: str) -> Dict:
-        """Extract structured requirements from user input using Gemini"""
-        model = genai.GenerativeModel('gemini-2.0-flash-exp')
-        
+    async def extract_requirements(cls, user_input: str) -> dict[str, Any]:
+        model = genai.GenerativeModel('gemini-1.5-flash')  # type: ignore[attr-defined]
         prompt = f"""
 Extract lead generation requirements from this user request: "{user_input}"
 
@@ -206,26 +172,20 @@ Example response:
 
 If the request is unclear, include clarifying_questions.
 """
-        
         try:
             response = await model.generate_content_async(prompt)
             result = response.text.strip()
-            
-            # Extract JSON from response
             if '```json' in result:
                 result = result.split('```json')[1].split('```')[0].strip()
             elif '```' in result:
                 result = result.split('```')[1].split('```')[0].strip()
-            
             return json.loads(result)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             _error(INTERNAL_ERROR, f"Gemini API error: {str(e)}")
-    
+
     @classmethod
     async def generate_search_queries(cls, requirements: LeadRequirement) -> List[str]:
-        """Generate optimized search queries for lead generation"""
-        model = genai.GenerativeModel('gemini-2.0-flash-exp')
-        
+        model = genai.GenerativeModel('gemini-1.5-flash')  # type: ignore[attr-defined]
         prompt = f"""
 Generate 3-5 effective Google search queries for finding business leads with these requirements:
 - Industry: {requirements.industry}
@@ -240,12 +200,11 @@ dentists in Toronto contact information
 dental offices Toronto phone email
 Toronto dentistry practices directory
 """
-        
         try:
             response = await model.generate_content_async(prompt)
             queries = [q.strip() for q in response.text.strip().split('\n') if q.strip()]
-            return queries[:5]  # Limit to 5 queries
-        except Exception as e:
+            return queries[:5]
+        except Exception as e:  # noqa: BLE001
             _error(INTERNAL_ERROR, f"Gemini API error: {str(e)}")
 
 # --- Lead Extraction Utility Class ---
@@ -254,44 +213,35 @@ class LeadExtractor:
         r'(\+?1?[-\.\s]?)?\(?([0-9]{3})\)?[-\.\s]?([0-9]{3})[-\.\s]?([0-9]{4})',
         r'(\+?\d{1,3}[-\.\s]?)?\(?([0-9]{3})\)?[-\.\s]?([0-9]{3})[-\.\s]?([0-9]{4})',
     ]
-    
-    EMAIL_PATTERNS = [
-        r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-    ]
-    
+    EMAIL_PATTERNS = [r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b']
+
     @classmethod
-    def extract_leads_from_results(cls, search_results: Dict, places_results: Dict) -> List[Dict]:
-        """Extract contact information from search and places results"""
-        leads = []
-        seen_phones = set()
-        
-        # Process regular search results
-        organic_results = search_results.get('organic', [])
+    def extract_leads_from_results(cls, search_results: Dict[str, Any], places_results: Dict[str, Any]) -> List[Dict[str, Any]]:
+        leads: List[Dict[str, Any]] = []
+        seen_phones: set[str] = set()
+
+        organic_results = search_results.get('organic', []) or []
         for result in organic_results:
-            lead = {
-                'name': result.get('title', '').replace(' - Google Search', ''),
+            lead: Dict[str, Any] = {
+                'name': (result.get('title') or '').replace(' - Google Search', ''),
                 'website': result.get('link', ''),
                 'phone': '',
                 'email': '',
                 'address': '',
                 'rating': '',
-                'source': 'search'
+                'source': 'search',
             }
-            
-            # Extract from snippet
             snippet = result.get('snippet', '')
             phone = cls._extract_phone(snippet)
             email = cls._extract_email(snippet)
-            
             if phone and phone not in seen_phones:
                 lead['phone'] = phone
                 seen_phones.add(phone)
                 if email:
                     lead['email'] = email
                 leads.append(lead)
-        
-        # Process places results
-        places = places_results.get('places', [])
+
+        places = places_results.get('places', []) or []
         for place in places:
             phone = place.get('phoneNumber', '')
             if phone and phone not in seen_phones:
@@ -302,25 +252,23 @@ class LeadExtractor:
                     'email': '',
                     'address': place.get('address', ''),
                     'rating': place.get('rating', ''),
-                    'source': 'places'
+                    'source': 'places',
                 }
                 seen_phones.add(phone)
                 leads.append(lead)
-        
+
         return leads
-    
+
     @classmethod
     def _extract_phone(cls, text: str) -> str:
-        """Extract phone number from text"""
         for pattern in cls.PHONE_PATTERNS:
             match = re.search(pattern, text)
             if match:
                 return match.group(0)
         return ''
-    
+
     @classmethod
     def _extract_email(cls, text: str) -> str:
-        """Extract email from text"""
         for pattern in cls.EMAIL_PATTERNS:
             match = re.search(pattern, text)
             if match:
@@ -330,80 +278,59 @@ class LeadExtractor:
 # --- CSV Generation Utility ---
 class CSVGenerator:
     @classmethod
-    async def generate_csv_file(cls, job_id: str, leads: List[Dict]) -> str:
-        """Generate CSV file from leads data"""
+    async def generate_csv_file(cls, job_id: str, leads: List[Dict[str, Any]]) -> str:
         temp_dir = tempfile.gettempdir()
         csv_path = os.path.join(temp_dir, f"leads_{job_id}.csv")
-        
         fieldnames = ['name', 'phone', 'email', 'website', 'address', 'rating', 'source']
-        
         with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
-            
             for lead in leads:
                 row = {field: lead.get(field, '') for field in fieldnames}
                 writer.writerow(row)
-        
         return csv_path
 
 # --- Background Processing ---
 async def _process_lead_generation(job_id: str, requirements: LeadRequirement):
-    """Process lead generation in background"""
     try:
         job = LEAD_JOBS[job_id]
-        
-        # Update progress
         job['progress'] = 10
-        
-        # Generate search queries
         queries = await GeminiAI.generate_search_queries(requirements)
         job['progress'] = 20
-        
-        all_leads = []
-        
-        # Process each query
+        all_leads: List[Dict[str, Any]] = []
         for i, query in enumerate(queries):
-            # Search results
-            search_results = await SerperAPI.search(
-                f"{query} {requirements.location}",
-                requirements.location,
-                num_results=20
-            )
-            
-            # Places results
-            places_results = await SerperAPI.places_search(
-                f"{requirements.industry} {requirements.location}",
-                requirements.location,
-                num_results=20
-            )
-            
-            # Extract leads
+            search_results = await SerperAPI.search(f"{query} {requirements.location}", requirements.location, num_results=20)
+            places_results = await SerperAPI.places_search(f"{requirements.industry} {requirements.location}", requirements.location, num_results=20)
             leads = LeadExtractor.extract_leads_from_results(search_results, places_results)
             all_leads.extend(leads)
-            
-            # Update progress
-            job['progress'] = 20 + (i + 1) * (70 / len(queries))
-        
-        # Deduplicate and limit results
-        unique_leads = []
-        seen_phones = set()
-        
+            job['progress'] = 20 + (i + 1) * (70 / max(1, len(queries)))
+
+        unique_leads: List[Dict[str, Any]] = []
+        seen_phones: set[str] = set()
         for lead in all_leads:
             phone = lead.get('phone', '')
             if phone and phone not in seen_phones and len(unique_leads) < requirements.max_results:
                 seen_phones.add(phone)
                 unique_leads.append(lead)
-        
-        # Update job status
+
         job['status'] = 'completed'
         job['progress'] = 100
         job['results'] = unique_leads
         job['completed_at'] = _now()
-        
-    except Exception as e:
-        job['status'] = 'failed'
-        job['error'] = str(e)
+    except Exception as e:  # noqa: BLE001
+        job = LEAD_JOBS.get(job_id)
+        if job is not None:
+            job['status'] = 'failed'
+            job['error'] = str(e)
+        else:
+            LEAD_JOBS[job_id] = {
+                'status': 'failed',
+                'progress': 0,
+                'requirements': getattr(requirements, 'dict', lambda: {})(),
+                'results': [],
+                'created_at': _now(),
+                'error': str(e),
+            }
 
 # --- MCP Server Setup ---
 mcp = FastMCP(
@@ -411,14 +338,13 @@ mcp = FastMCP(
     auth=SimpleBearerAuthProvider(TOKEN),
 )
 
-# Start cleanup scheduler
 _start_cleanup_scheduler()
 
 # --- Tool: validate (required by Puch) ---
 @mcp.tool
 async def validate() -> str:
     """Validate MCP server for Puch AI integration - returns owner phone number"""
-    return json.dumps({"phone": MY_NUMBER})
+    return str(MY_NUMBER)
 
 # --- Tool descriptions (rich) ---
 DISCUSS_DESCRIPTION = RichToolDescription(
@@ -444,27 +370,23 @@ CREATE_DESCRIPTION = RichToolDescription(
 async def discuss(
     user_request: Annotated[str, Field(description="User's lead generation request in natural language")]
 ) -> str:
-    """Extract and clarify lead generation requirements from user input"""
     try:
         requirements = await GeminiAI.extract_requirements(user_request)
-        
         if requirements.get('clarifying_questions'):
             response = {
                 "status": "needs_clarification",
                 "extracted_requirements": requirements,
                 "questions": requirements['clarifying_questions'],
-                "message": "I need some clarification to generate the best leads for you."
+                "message": "I need some clarification to generate the best leads for you.",
             }
         else:
             response = {
                 "status": "requirements_ready",
                 "requirements": requirements,
-                "message": f"Ready to generate leads for {requirements.get('industry', 'businesses')} in {requirements.get('location', 'specified location')}."
+                "message": f"Ready to generate leads for {requirements.get('industry', 'businesses')} in {requirements.get('location', 'specified location')}.",
             }
-        
         return json.dumps(response, indent=2)
-        
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         _error(INTERNAL_ERROR, f"Error processing request: {str(e)}")
 
 # --- Tool: build (lead generation) ---
@@ -472,39 +394,30 @@ async def discuss(
 async def build(
     requirements: Annotated[str, Field(description="JSON string of lead generation requirements from discuss tool")]
 ) -> str:
-    """Generate leads based on confirmed requirements"""
     try:
-        # Parse requirements
         req_data = json.loads(requirements)
         lead_req = LeadRequirement(**req_data)
-        
-        # Create job
         job_id = str(uuid.uuid4())
         LEAD_JOBS[job_id] = {
             'status': 'processing',
             'progress': 0,
             'requirements': lead_req.dict(),
             'results': [],
-            'created_at': _now()
+            'created_at': _now(),
         }
-        
-        # Start processing in background
         asyncio.create_task(_process_lead_generation(job_id, lead_req))
-        
         status_response = {
             "job_id": job_id,
             "status": "processing",
             "progress": 0,
             "estimated_completion": (datetime.now() + timedelta(minutes=3)).isoformat(),
             "results_count": 0,
-            "message": "Lead generation started. This will take 2-5 minutes to complete."
+            "message": "Lead generation started. This will take 2-5 minutes to complete.",
         }
-        
         return json.dumps(status_response, indent=2)
-        
     except json.JSONDecodeError:
         _error(INVALID_PARAMS, "Invalid requirements JSON")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         _error(INTERNAL_ERROR, f"Error starting lead generation: {str(e)}")
 
 # --- Tool: create (CSV generation and delivery) ---
@@ -512,39 +425,30 @@ async def build(
 async def create(
     job_id: Annotated[str, Field(description="Job ID from the build tool")]
 ) -> str:
-    """Generate CSV file and return download URL"""
     try:
         if job_id not in LEAD_JOBS:
             _error(INVALID_PARAMS, "Job ID not found")
-        
         job = LEAD_JOBS[job_id]
         if job['status'] == 'processing':
             return json.dumps({
                 "status": "processing",
                 "message": "Lead generation still in progress. Please wait and try again.",
-                "progress": job.get('progress', 0)
+                "progress": job.get('progress', 0),
             })
-        elif job['status'] == 'failed':
+        if job['status'] == 'failed':
             return json.dumps({
                 "status": "failed",
-                "message": f"Lead generation failed: {job.get('error', 'Unknown error')}"
+                "message": f"Lead generation failed: {job.get('error', 'Unknown error')}",
             })
-        
-        # Generate CSV
         csv_path = await CSVGenerator.generate_csv_file(job_id, job['results'])
-        
-        # Read CSV content for direct delivery
         with open(csv_path, 'r', encoding='utf-8') as f:
             csv_content = f.read()
-        
-        # Create delivery info
         expires_at = datetime.now() + timedelta(seconds=CSV_TTL_SECONDS)
         CSV_FILES[job_id] = {
             'file_path': csv_path,
             'expires_at': expires_at.isoformat(),
-            'total_leads': len(job['results'])
+            'total_leads': len(job['results']),
         }
-        
         delivery_response = {
             "job_id": job_id,
             "status": "completed",
@@ -552,17 +456,11 @@ async def create(
             "fields": ["name", "phone", "email", "website", "address", "rating", "source"],
             "message": f"✅ CSV generated with {len(job['results'])} leads!",
             "csv_content": csv_content,
-            "filename": f"leads_{job_id}.csv"
+            "filename": f"leads_{job_id}.csv",
         }
-        
         return json.dumps(delivery_response, indent=2)
-        
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         _error(INTERNAL_ERROR, f"Error creating CSV: {str(e)}")
-
-# --- File serving endpoint (simplified for MCP) ---
-# Note: In production, you'd want to implement proper file serving
-# For now, users can get the CSV content through the create tool response
 
 # --- Run MCP Server ---
 async def main():
