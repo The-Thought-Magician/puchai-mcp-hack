@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: lead-generator-mcp
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    envVars:
+      - key: PORT
+        value: 8086
+      - key: PYTHON_VERSION
+        value: 3.11
+    autoDeploy: false
