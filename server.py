@@ -417,7 +417,8 @@ _start_cleanup_scheduler()
 # --- Tool: validate (required by Puch) ---
 @mcp.tool
 async def validate() -> str:
-    return MY_NUMBER
+    """Validate MCP server for Puch AI integration - returns owner phone number"""
+    return json.dumps({"phone": MY_NUMBER})
 
 # --- Tool descriptions (rich) ---
 DISCUSS_DESCRIPTION = RichToolDescription(
