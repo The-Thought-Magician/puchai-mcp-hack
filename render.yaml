@@ -3,7 +3,7 @@ services:
     name: puchai-mcp-server
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python server.py
+    startCommand: python enhanced_server.py
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
@@ -11,3 +11,5 @@ services:
         value: 8080
       - key: SERPER_API_KEY
         fromSecret: SERPER_API_KEY
+      - key: GEMINI_API_KEY
+        fromSecret: GEMINI_API_KEY
